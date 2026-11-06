@@ -1,0 +1,219 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Image Wall</title>
+<style>
+  :root { color-scheme: light; }
+  html, body { height: 100%; margin: 0; background: #ffffff; color: #1a1a1a; font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; overflow: hidden; }
+  #stage { position: fixed; inset: 0; overflow: hidden; background: #ffffff; }
+  .pic { position: absolute; left: 0; top: 0; will-change: transform; border-radius: 10px; box-shadow: 0 4px 18px rgba(0,0,0,.14); background: #f3f3f3; object-fit: cover; user-select: none; -webkit-user-drag: none; }
+  #bar { position: fixed; left: 0; right: 0; bottom: 0; display: flex; gap: 10px; align-items: center; justify-content: center; padding: 14px 16px calc(14px + env(safe-area-inset-bottom, 0px)); background: rgba(255,255,255,.92); border-top: 1px solid #eee; z-index: 5; flex-wrap: wrap; }
+  button, label.btn { font: inherit; font-size: 15px; padding: 10px 18px; border-radius: 999px; border: 1px solid #1a1a1a; background: #1a1a1a; color: #fff; cursor: pointer; }
+  button.ghost { background: #fff; color: #1a1a1a; }
+  #status { font-size: 14px; color: #666; }
+  #empty { position: fixed; inset: 0; display: grid; place-items: center; color: #999; font-size: 18px; pointer-events: none; text-align: center; padding: 24px; }
+  input[type=file] { display: none; }
+  #qrPanel { position: fixed; top: calc(env(safe-area-inset-top, 0px) + 16px); right: 16px; z-index: 6; background: #fff; border: 1px solid #e5e5e5; border-radius: 14px; padding: 12px; text-align: center; box-shadow: 0 4px 18px rgba(0,0,0,.10); }
+  #qrBox { display: inline-block; background: #fff; }
+  #qrBox img, #qrBox canvas { display: block; max-width: 100%; }
+  #qrPanel p { margin: 8px 0 0; font-size: 14px; color: #333; }
+  #setup { position: fixed; inset: 0; display: none; place-items: center; background: #fff; z-index: 20; padding: 24px; text-align: center; font-size: 17px; line-height: 1.5; }
+</style>
+</head>
+<body>
+<div id="stage"></div>
+<div id="empty">No images yet. Be the first to upload one.</div>
+<div id="qrPanel">
+  <div id="qrBox"></div>
+  <p>Scan to upload your image</p>
+</div>
+<div id="bar">
+  <label class="btn" for="file">Upload your image</label>
+  <input type="file" id="file" accept="image/png,image/jpeg,image/gif,image/webp">
+  <button class="ghost" id="del" hidden>Remove my image</button>
+  <span id="status"></span>
+</div>
+<div id="setup">Setup missing: open index.html and enter your Supabase URL and key in the two lines at the top of the script.</div>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/qrcodejs/1.0.0/qrcode.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.117.3/dist/umd/supabase.js"></script>
+<script>
+// ===== SETTINGS: paste your own values here (see SETUP.md) =====
+var SUPABASE_URL = "https://jwjuqfxvpvemmfejqlwg.supabase.co";
+var SUPABASE_KEY = "sb_publishable_RAHWWNzoCXSGTaxeekdH5A_2_jgTope";
+// ===============================================================
+
+(function () {
+  var BUCKET = "wall";
+  var stage = document.getElementById("stage");
+  var emptyEl = document.getElementById("empty");
+  var statusEl = document.getElementById("status");
+  var fileInput = document.getElementById("file");
+  var delBtn = document.getElementById("del");
+  var items = {};          // user_id -> {el, x, y, vx, vy, w, h, path}
+  var myId = null, sb = null;
+  var BAR_H = 70;
+
+  function setStatus(t) { statusEl.textContent = t || ""; }
+
+  // QR code always points to the address this page is served from
+  (function () {
+    var box = document.getElementById("qrBox");
+    var url = location.origin + location.pathname;
+    var size = window.innerWidth < 600 ? 110 : 170;
+    if (window.QRCode && /^https?:/.test(url)) {
+      new QRCode(box, { text: url, width: size, height: size, colorDark: "#000000", colorLight: "#ffffff", correctLevel: QRCode.CorrectLevel.M });
+    } else {
+      box.textContent = url;
+    }
+  })();
+
+  if (SUPABASE_URL.indexOf("PASTE_") === 0 || SUPABASE_KEY.indexOf("PASTE_") === 0 || !window.supabase) {
+    document.getElementById("setup").style.display = "grid";
+    return;
+  }
+  sb = window.supabase.createClient(SUPABASE_URL, SUPABASE_KEY);
+
+  function sizeFor() {
+    var s = Math.min(window.innerWidth, window.innerHeight);
+    return Math.max(110, Math.min(220, Math.round(s * 0.26)));
+  }
+  function urlFor(path) { return sb.storage.from(BUCKET).getPublicUrl(path).data.publicUrl; }
+
+  function addItem(id, path) {
+    var old = items[id];
+    if (old && old.path === path) return;
+    if (old) removeItem(id);
+    var w = sizeFor(), h = Math.round(w * 0.8);
+    var el = document.createElement("img");
+    el.className = "pic"; el.alt = ""; el.draggable = false;
+    el.style.width = w + "px"; el.style.height = h + "px";
+    el.onload = function () {
+      var r = el.naturalWidth / el.naturalHeight;
+      var it = items[id];
+      if (it && r > 0) { it.h = Math.round(it.w / Math.max(0.5, Math.min(2, r))); el.style.height = it.h + "px"; }
+    };
+    el.src = urlFor(path);
+    stage.appendChild(el);
+    var W = window.innerWidth, H = window.innerHeight - BAR_H;
+    var ang = Math.random() * Math.PI * 2, sp = 0.5 + Math.random() * 0.9;
+    items[id] = { el: el, path: path, w: w, h: h,
+      x: Math.random() * Math.max(1, W - w), y: Math.random() * Math.max(1, H - h),
+      vx: Math.cos(ang) * sp, vy: Math.sin(ang) * sp };
+    updateUi();
+  }
+  function removeItem(id) {
+    var it = items[id];
+    if (!it) return;
+    if (it.el.parentNode) it.el.parentNode.removeChild(it.el);
+    delete items[id];
+    updateUi();
+  }
+  function updateUi() {
+    emptyEl.style.display = Object.keys(items).length ? "none" : "grid";
+    delBtn.hidden = !(myId && items[myId]);
+  }
+
+  var last = performance.now();
+  function tick(now) {
+    var dt = Math.min(48, now - last) / 16.67; last = now;
+    var W = window.innerWidth, H = window.innerHeight - BAR_H;
+    for (var id in items) {
+      var it = items[id];
+      it.x += it.vx * dt; it.y += it.vy * dt;
+      if (it.x < 0) { it.x = 0; it.vx = Math.abs(it.vx); }
+      if (it.y < 0) { it.y = 0; it.vy = Math.abs(it.vy); }
+      if (it.x + it.w > W) { it.x = Math.max(0, W - it.w); it.vx = -Math.abs(it.vx); }
+      if (it.y + it.h > H) { it.y = Math.max(0, H - it.h); it.vy = -Math.abs(it.vy); }
+      it.el.style.transform = "translate(" + it.x.toFixed(1) + "px," + it.y.toFixed(1) + "px)";
+    }
+    requestAnimationFrame(tick);
+  }
+  requestAnimationFrame(tick);
+
+  function shrink(file) {
+    return new Promise(function (resolve) {
+      if (file.type === "image/gif") return resolve(file);
+      var url = URL.createObjectURL(file);
+      var img = new Image();
+      img.onload = function () {
+        var max = 900, s = Math.min(1, max / Math.max(img.naturalWidth, img.naturalHeight));
+        var c = document.createElement("canvas");
+        c.width = Math.round(img.naturalWidth * s); c.height = Math.round(img.naturalHeight * s);
+        c.getContext("2d").drawImage(img, 0, 0, c.width, c.height);
+        c.toBlob(function (b) { URL.revokeObjectURL(url); resolve(b || file); }, "image/jpeg", 0.88);
+      };
+      img.onerror = function () { URL.revokeObjectURL(url); resolve(file); };
+      img.src = url;
+    });
+  }
+
+  async function refresh() {
+    var res = await sb.from("images").select("user_id,path");
+    if (res.error || !res.data) return;
+    var seen = {};
+    res.data.forEach(function (r) { seen[r.user_id] = true; addItem(r.user_id, r.path); });
+    Object.keys(items).forEach(function (id) { if (!seen[id]) removeItem(id); });
+    updateUi();
+  }
+
+  fileInput.addEventListener("change", async function () {
+    var f = fileInput.files && fileInput.files[0];
+    fileInput.value = "";
+    if (!f) return;
+    if (!myId) { setStatus("Not ready yet, please try again in a moment."); return; }
+    setStatus("Uploading…");
+    try {
+      var blob = await shrink(f);
+      var isGif = blob.type === "image/gif";
+      var path = myId + "/" + Date.now() + (isGif ? ".gif" : ".jpg");
+      var up = await sb.storage.from(BUCKET).upload(path, blob, { contentType: blob.type || "image/jpeg", upsert: false });
+      if (up.error) throw up.error;
+      var prev = items[myId] ? items[myId].path : null;
+      var row = await sb.from("images").upsert({ user_id: myId, path: path }, { onConflict: "user_id" });
+      if (row.error) throw row.error;
+      if (prev && prev !== path) { await sb.storage.from(BUCKET).remove([prev]); }
+      setStatus("Done. Your image is on the wall.");
+      refresh();
+    } catch (e) {
+      setStatus("Upload failed. Please try again with a smaller image.");
+    }
+  });
+
+  delBtn.addEventListener("click", async function () {
+    var it = items[myId];
+    if (!it) return;
+    try {
+      var d = await sb.from("images").delete().eq("user_id", myId);
+      if (d.error) throw d.error;
+      await sb.storage.from(BUCKET).remove([it.path]);
+      setStatus("Your image was removed.");
+      refresh();
+    } catch (e) { setStatus("Could not remove it. Please try again."); }
+  });
+
+  async function init() {
+    try {
+      var s = await sb.auth.getSession();
+      if (!s.data.session) {
+        var r = await sb.auth.signInAnonymously();
+        if (r.error) throw r.error;
+        s = await sb.auth.getSession();
+      }
+      myId = s.data.session.user.id;
+    } catch (e) {
+      setStatus("You can watch the wall, but uploading is not available right now.");
+    }
+    await refresh();
+    sb.channel("images-live")
+      .on("postgres_changes", { event: "*", schema: "public", table: "images" }, function () { refresh(); })
+      .subscribe();
+    setInterval(refresh, 10000);   // fallback if realtime is not enabled
+  }
+  init();
+})();
+</script>
+</body>
+</html>
